@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="zh-HK">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SRT 繁中轉英文 AI 翻譯器 (Gemini 3.5 Flash Lite)</title>
+    <style>
+        :root {
+            --bg-color: #121212;
+            --card-bg: #1e1e1e;
+            --text-color: #e0e0e0;
+            --text-secondary: #a0a0a0;
+            --border-color: #333333;
+            --input-bg: #2a2a2a;
+            --primary-color: #0a84ff;
+            --primary-hover: #0066cc;
+            --button-disabled: #444444;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            max-width: 800px;
+            margin: 20px auto;
+            padding: 20px;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+        }
+
+        .container {
+            background: var(--card-bg);
+            padding: 30px;
+            border-radius: 12px;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+            border: 1px solid var(--border-color);
+        }
+
+        h1 {
+            margin-top: 0;
+            font-size: 24px;
+            color: #ffffff;
+            border-bottom: 1px solid var(--border-color);
+            padding-bottom: 15px;
+        }
+
+        .form-group {
+            margin-bottom: 20px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 600;
+            color: var(--text-color);
+        }
+
+        input[type="text"],
+        input[type="password"],
+        textarea,
+        input[type="file"],
+        input[type="number"],
+        select {
+            width: 100%;
+            padding: 12px;
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            box-sizing: border-box;
+            font-size: 14px;
+            background-color: var(--input-bg);
+            color: var(--text-color);
+            transition: border-color 0.2s;
+        }
+
+        input[type="text"]:focus,
+        input[type="password"]:focus,
+        textarea:focus,
+        input[type="number"]:focus,
+        select:focus {
+            outline: none;
+            border-color: var(--primary-color);
+        }
+
+        textarea {
+            height: 120px;
+            resize: vertical;
+        }
+
+        button {
+            background-color: var(--primary-color);
+            color: white;
+            border: none;
+            padding: 14px 20px;
+            border-radius: 6px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            width: 100%;
+            transition: background-color 0.2s;
+        }
+
+        button:hover {
+            background-color: var(--primary-hover);
+        }
+
+        button:disabled {
+            background-color: var(--button-disabled);
+            color: #888888;
+            cursor: not-allowed;
+        }
+
+        .download-group {
+            display: flex;
+            gap: 10px;
+            margin-top: 15px;
+        }
+
+        #status {
+            margin-top: 15px;
+            font-weight: bold;
+            white-space: pre-line;
+            color: #34c759;
+        }
+
+        .error-status {
+            color: #ff453a !important;
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>SRT 繁中轉英文 AI 翻譯器</h1>
+    
+    <div class="form-group">
+        <label for="apiKey">Gemini API Key:</label>
+        <input type="password" id="apiKey" placeholder="請輸入你的 Gemini API Key">
+    </div>
+
+    <div class="form-group">
+        <label for="batchSize">每批處理字幕條數 (建議 20-30 條):</label>
+        <input type="number" id="batchSize" value="25" min="5" max="50">
+    </div>
+
+    <div class="form-group">
+        <label for="referenceTranscript">參考 Teleprompter 讀稿機文本 / Transcript (選填，有助於精準翻譯專有名詞):</label>
+        <textarea id="referenceTranscript" placeholder="請在此貼上原始文稿或參考 Transcript..."></textarea>
+    </div>
+
+    <div class="form-group">
+        <label for="srtFile">選擇繁體中文 SRT 檔案:</label>
+        <input type="file" id="srtFile" accept=".srt">
+    </div>
+
+    <button id="convertBtn" onclick="processSRT()">開始翻譯為英文</button>
+
+    <div id="status"></div>
+
+    <div id="downloadArea" class="download-group" style="display: none;">
+        <button id="dlEnBtn" onclick="downloadEn()">下載英文字幕 (_English.srt)</button>
+    </div>
+</div>
+
+<script>
+let globalEnSRT = '';
+let globalBaseFileName = 'subtitles';
+
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+document.addEventListener('DOMContentLoaded', () => {
+    const savedApiKey = localStorage.getItem('gemini_api_key');
+    if (savedApiKey) {
+        document.getElementById('apiKey').value = savedApiKey;
+    }
+});
+
+function parseSRT(text) {
+    const normalizedText = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    const blocks = normalizedText.trim().split(/\n\n+/);
+    const parsed = [];
+
+    for (const block of blocks) {
+        const lines = block.split('\n');
+        if (lines.length >= 3) {
+            const index = lines[0].trim();
+            const time = lines[1].trim();
+            const content = lines.slice(2).join('\n').trim();
+            parsed.push({ index, time, content });
+        }
+    }
+    return parsed;
+}
+
+async function processSRT() {
+    const apiKey = document.getElementById('apiKey').value.trim();
+    const batchSize = parseInt(document.getElementById('batchSize').value, 10) || 25;
+    const referenceTranscript = document.getElementById('referenceTranscript').value.trim();
+    const fileInput = document.getElementById('srtFile');
+    const statusDiv = document.getElementById('status');
+    const convertBtn = document.getElementById('convertBtn');
+    const downloadArea = document.getElementById('downloadArea');
+
+    statusDiv.classList.remove('error-status');
+    downloadArea.style.display = 'none';
+
+    if (!apiKey) {
+        alert('請輸入 Gemini API Key！');
+        return;
+    }
+    if (fileInput.files.length === 0) {
+        alert('請選擇一個 SRT 檔案！');
+        return;
+    }
+
+    localStorage.setItem('gemini_api_key', apiKey);
+
+    const file = fileInput.files[0];
+    globalBaseFileName = file.name.replace(/\.srt$/i, '');
+    const reader = new FileReader();
+
+    reader.onload = async function(e) {
+        const srtContent = e.target.result;
+        const items = parseSRT(srtContent);
+        
+        if (items.length === 0) {
+            alert('無法解析 SRT 檔案內容！');
+            return;
+        }
+
+        convertBtn.disabled = true;
+        
+        const totalBatches = Math.ceil(items.length / batchSize);
+        let enItems = [];
+
+        try {
+            for (let i = 0; i < totalBatches; i++) {
+                const chunk = items.slice(i * batchSize, (i + 1) * batchSize);
+                const rawContents = chunk.map(item => item.content);
+
+                let batchResult = null;
+                let maxRetries = 5;
+                let retryDelay = 5000;
+
+                for (let attempt = 1; attempt <= maxRetries; attempt++) {
+                    try {
+                        statusDiv.innerText = `正在翻譯第 ${i + 1} / ${totalBatches} 批字幕 (第 ${i * batchSize + 1} 至 ${Math.min((i + 1) * batchSize, items.length)} 條)...`;
+                        batchResult = await translateBatch(apiKey, rawContents, referenceTranscript);
+                        break;
+                    } catch (err) {
+                        if (attempt === maxRetries) throw err;
+                        
+                        statusDiv.innerText = `⚠️ 觸及 API 限額，正等待 ${retryDelay / 1000} 秒後自動重試 (第 ${attempt}/${maxRetries} 次)...`;
+                        await sleep(retryDelay);
+                        retryDelay += 3000;
+                    }
+                }
+                
+                for (let j = 0; j < chunk.length; j++) {
+                    enItems.push({
+                        index: chunk[j].index,
+                        time: chunk[j].time,
+                        content: batchResult.en[j] || chunk[j].content
+                    });
+                }
+            }
+
+            globalEnSRT = enItems.map(item => `${item.index}\n${item.time}\n${item.content}`).join('\n\n');
+
+            statusDiv.innerText = '翻譯完成！請點擊下方按鈕下載：';
+            downloadArea.style.display = 'flex';
+        } catch (error) {
+            console.error(error);
+            statusDiv.classList.add('error-status');
+            statusDiv.innerText = '發生錯誤: ' + error.message;
+        } finally {
+            convertBtn.disabled = false;
+        }
+    };
+
+    reader.readAsText(file);
+}
+
+async function translateBatch(apiKey, textArray, refTranscript) {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent?key=${apiKey}`;
+
+    let prompt = `You are a professional video translator and subtitle editor.\n`;
+    prompt += `Your task is to translate Traditional Chinese video subtitles (including Cantonese slang and spoken phrases) into natural, concise, and accurate English subtitles.\n\n`;
+
+    prompt += `【Translation Rules】\n`;
+    prompt += `1. **Natural & Concise Subtitles**: Avoid word-for-word translation. Keep English subtitles readable, concise, and fitting standard video subtitle reading speed.\n`;
+    prompt += `2. **Handle Colloquial Cantonese/Traditional Chinese**: Correctly interpret local spoken idioms (e.g., "喺" -> at/in, "睇" -> watch/see, "咁" -> so/then, "冇" -> no/don't have) into natural English equivalents.\n`;
+    prompt += `3. **Filter Filler Words**: Omit filler words or stutters (e.g., "呃", "啊", "嗯", "咁呢") if they add no context.\n`;
+    prompt += `4. **Strict Array Length**: The output JSON array MUST match the exact length and order of the input array (1-to-1 mapping).\n\n`;
+
+    prompt += `Output format MUST be a valid JSON object: {"en": ["English translation 1", "English translation 2"]}\n`;
+
+    if (refTranscript) {
+        prompt += `\nReference Teleprompter Transcript for Context:\n${refTranscript}\n`;
+    }
+
+    prompt += `\nSubtitle Array to Translate JSON:\n${JSON.stringify(textArray)}`;
+
+    const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            contents: [{ parts: [{ text: prompt }] }],
+            generationConfig: {
+                responseMimeType: "application/json"
+            }
+        })
+    });
+
+    if (!response.ok) {
+        const errData = await response.json();
+        throw new Error(errData.error?.message || 'API 請求失敗');
+    }
+
+    const data = await response.json();
+    let resultText = data.candidates[0].content.parts[0].text;
+
+    try {
+        const parsedObject = JSON.parse(resultText);
+        let resEn = textArray;
+
+        if (parsedObject.en && Array.isArray(parsedObject.en) && parsedObject.en.length === textArray.length) {
+            resEn = parsedObject.en;
+        }
+
+        return { en: resEn };
+    } catch (e) {
+        console.warn('JSON 解析失敗', e);
+    }
+    
+    return { en: textArray };
+}
+
+function triggerDownload(content, filename) {
+    const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(link);
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(link.href);
+}
+
+function downloadEn() {
+    triggerDownload(globalEnSRT, `${globalBaseFileName}_English.srt`);
+}
+</script>
+
+</body>
+</html>

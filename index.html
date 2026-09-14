@@ -179,10 +179,10 @@ function parseSRT(text) {
 
     for (const block of blocks) {
         const lines = block.split('\n');
-        if (lines.length >= 3) {
+        if (lines.length >= 2) {
             const index = lines[0].trim();
             const time = lines[1].trim();
-            const content = lines.slice(2).join('\n').trim();
+            const content = lines.length > 2 ? lines.slice(2).join('\n').trim() : '';
             parsed.push({ index, time, content });
         }
     }

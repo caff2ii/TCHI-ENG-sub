@@ -247,17 +247,23 @@ async function processSRT() {
                     } catch (err) {
                         if (attempt === maxRetries) throw err;
                         
-                        statusDiv.innerText = `⚠️ 觸及 API 限額，正等待 ${retryDelay / 1000} 秒後自動重試 (第 ${attempt}/${maxRetries} 次)...`;
+                        statusDiv.innerText = `⚠️ API 錯誤 (${err.message})，正等待 ${retryDelay / 1000} 秒後自動重試 (第 ${attempt}/${maxRetries} 次)...`;
                         await sleep(retryDelay);
                         retryDelay += 3000;
                     }
                 }
                 
                 for (let j = 0; j < chunk.length; j++) {
+                    // 確保內容不為空，若 AI 返回空字串或未定義，保留原文防止字幕消失
+                    let finalContent = batchResult.en[j];
+                    if (!finalContent || finalContent.trim() === '') {
+                        finalContent = chunk[j].content;
+                    }
+
                     enItems.push({
                         index: chunk[j].index,
                         time: chunk[j].time,
-                        content: batchResult.en[j] || chunk[j].content
+                        content: finalContent
                     });
                 }
             }
@@ -279,24 +285,24 @@ async function processSRT() {
 }
 
 async function translateBatch(apiKey, textArray, refTranscript) {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent?key=${apiKey}`;
+    const url = `[https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent?key=$](https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent?key=$){apiKey}`;
 
     let prompt = `You are a professional subtitle translator specializing in YouTube vlogs and interview videos.\n`;
     prompt += `Translate the following Traditional Chinese / Cantonese subtitles into natural, engaging, and conversational English.\n\n`;
 
-    prompt += `【Guidelines】\n`;
-    prompt += `1. **YouTube Vlog & Interview Style**: Use casual, natural, and punchy English suitable for modern video subtitles. Avoid overly formal or rigid academic language.\n`;
-    prompt += `2. **Screen Readability**: Keep sentences concise and easy to read quickly on screen without changing the original meaning.\n`;
-    prompt += `3. **Filter Fillers**: Omit stutters and filler words (e.g., "呃", "啊", "咁呢") to keep the subtitles clean.\n`;
-    prompt += `4. **Strict 1-to-1 Mapping**: The returned array MUST contain the exact same number of items in the exact same order as the input array.\n\n`;
+    prompt += `【Strict Rules】\n`;
+    prompt += `1. **YouTube Vlog Style**: Use natural, conversational English suitable for modern video subtitles.\n`;
+    prompt += `2. **Screen Readability**: Keep sentences concise and easy to read quickly on screen.\n`;
+    prompt += `3. **CRITICAL - Exact Array Length**: You MUST return a JSON array with EXACTLY ${textArray.length} items, matching the input array 1-to-1. Do NOT merge, skip, or split items.\n`;
+    prompt += `4. **No Blank Output**: Every element in the output array MUST contain a valid English translation. Never return empty strings.\n\n`;
 
-    prompt += `Output format MUST be a valid JSON object: {"en": ["English translation 1", "English translation 2"]}\n`;
+    prompt += `Output MUST be a valid JSON object in this exact format: {"en": ["Translation 1", "Translation 2"]}\n`;
 
     if (refTranscript) {
-        prompt += `\nReference Teleprompter Transcript for Context:\n${refTranscript}\n`;
+        prompt += `\nReference Transcript / Context:\n${refTranscript}\n`;
     }
 
-    prompt += `\nSubtitle Array to Translate JSON:\n${JSON.stringify(textArray)}`;
+    prompt += `\nSubtitles to translate (${textArray.length} items):\n${JSON.stringify(textArray)}`;
 
     const response = await fetch(url, {
         method: 'POST',
@@ -315,22 +321,29 @@ async function translateBatch(apiKey, textArray, refTranscript) {
     }
 
     const data = await response.json();
-    let resultText = data.candidates[0].content.parts[0].text;
+    let resultText = data.candidates[0]?.content?.parts[0]?.text || '';
+
+    // 清理可能發生的 Markdown 標籤，確保 JSON.parse 成功
+    resultText = resultText.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/i, '').trim();
+
+    let resEn = [...textArray]; // 預設降級方案
 
     try {
         const parsedObject = JSON.parse(resultText);
-        let resEn = textArray;
-
-        if (parsedObject.en && Array.isArray(parsedObject.en) && parsedObject.en.length === textArray.length) {
-            resEn = parsedObject.en;
+        if (parsedObject.en && Array.isArray(parsedObject.en)) {
+            // 容錯機制：若 AI 回傳數量少於或多於原條數，強制補齊/裁切以對齊長度
+            resEn = textArray.map((original, idx) => {
+                return parsedObject.en[idx] && parsedObject.en[idx].trim() !== '' 
+                    ? parsedObject.en[idx] 
+                    : original;
+            });
         }
-
-        return { en: resEn };
     } catch (e) {
-        console.warn('JSON 解析失敗', e);
+        console.warn('JSON 解析失敗，重試或退回原始內容', e, resultText);
+        throw new Error('AI 回傳格式非標準 JSON，觸發重試机制');
     }
     
-    return { en: textArray };
+    return { en: resEn };
 }
 
 function triggerDownload(content, filename) {

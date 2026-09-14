@@ -246,15 +246,21 @@ async function processSRT() {
                         break;
                     } catch (err) {
                         if (attempt === maxRetries) throw err;
-                        
-                        statusDiv.innerText = `⚠️ API 錯誤 (${err.message})，正等待 ${retryDelay / 1000} 秒後自動重試 (第 ${attempt}/${maxRetries} 次)...`;
-                        await sleep(retryDelay);
-                        retryDelay += 3000;
+
+                        const msg = (err && err.message) ? err.message : '';
+                        const isRateLimit = msg.includes('429') || msg.includes('RESOURCE_EXHAUSTED') || msg.includes('quota');
+
+                        if (isRateLimit) {
+                            statusDiv.innerText = `⚠️ 觸及 API 限額，正等待 ${retryDelay / 1000} 秒後自動重試 (第 ${attempt}/${maxRetries} 次)...`;
+                            await sleep(retryDelay);
+                            retryDelay += 3000;
+                        } else {
+                            throw err;
+                        }
                     }
                 }
                 
                 for (let j = 0; j < chunk.length; j++) {
-                    // 確保內容不為空，若 AI 返回空字串或未定義，保留原文防止字幕消失
                     let finalContent = batchResult.en[j];
                     if (!finalContent || finalContent.trim() === '') {
                         finalContent = chunk[j].content;
@@ -285,7 +291,7 @@ async function processSRT() {
 }
 
 async function translateBatch(apiKey, textArray, refTranscript) {
-    const url = `[https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent?key=$](https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent?key=$){apiKey}`;
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent?key=${apiKey}`;
 
     let prompt = `You are a professional subtitle translator specializing in YouTube vlogs and interview videos.\n`;
     prompt += `Translate the following Traditional Chinese / Cantonese subtitles into natural, engaging, and conversational English.\n\n`;
@@ -293,8 +299,9 @@ async function translateBatch(apiKey, textArray, refTranscript) {
     prompt += `【Strict Rules】\n`;
     prompt += `1. **YouTube Vlog Style**: Use natural, conversational English suitable for modern video subtitles.\n`;
     prompt += `2. **Screen Readability**: Keep sentences concise and easy to read quickly on screen.\n`;
-    prompt += `3. **CRITICAL - Exact Array Length**: You MUST return a JSON array with EXACTLY ${textArray.length} items, matching the input array 1-to-1. Do NOT merge, skip, or split items.\n`;
-    prompt += `4. **No Blank Output**: Every element in the output array MUST contain a valid English translation. Never return empty strings.\n\n`;
+    prompt += `3. **Handle Colloquial Cantonese/Traditional Chinese**: Correctly interpret local spoken idioms (e.g., "喺" -> at/in, "睇" -> watch/see, "咁" -> so/then, "冇" -> don't have) into fluent English.\n`;
+    prompt += `4. **CRITICAL - Exact Array Length**: You MUST return a JSON array with EXACTLY ${textArray.length} items, matching the input array 1-to-1. Do NOT merge, skip, or split items.\n`;
+    prompt += `5. **No Blank Output**: Every element in the output array MUST contain a valid English translation. Never return empty strings.\n\n`;
 
     prompt += `Output MUST be a valid JSON object in this exact format: {"en": ["Translation 1", "Translation 2"]}\n`;
 
@@ -317,32 +324,30 @@ async function translateBatch(apiKey, textArray, refTranscript) {
 
     if (!response.ok) {
         const errData = await response.json();
-        throw new Error(errData.error?.message || 'API 請求失敗');
+        throw new Error(errData.error?.message || `API 請求失敗 (${response.status})`);
     }
 
     const data = await response.json();
     let resultText = data.candidates[0]?.content?.parts[0]?.text || '';
 
-    // 清理可能發生的 Markdown 標籤，確保 JSON.parse 成功
     resultText = resultText.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/i, '').trim();
 
-    let resEn = [...textArray]; // 預設降級方案
+    let resEn = [...textArray];
 
     try {
         const parsedObject = JSON.parse(resultText);
         if (parsedObject.en && Array.isArray(parsedObject.en)) {
-            // 容錯機制：若 AI 回傳數量少於或多於原條數，強制補齊/裁切以對齊長度
             resEn = textArray.map((original, idx) => {
-                return parsedObject.en[idx] && parsedObject.en[idx].trim() !== '' 
-                    ? parsedObject.en[idx] 
+                return parsedObject.en[idx] && parsedObject.en[idx].trim() !== ''
+                    ? parsedObject.en[idx]
                     : original;
             });
         }
     } catch (e) {
         console.warn('JSON 解析失敗，重試或退回原始內容', e, resultText);
-        throw new Error('AI 回傳格式非標準 JSON，觸發重試机制');
+        throw new Error('AI 回傳格式非標準 JSON，觸發重試機制');
     }
-    
+
     return { en: resEn };
 }
 
@@ -351,9 +356,10 @@ function triggerDownload(content, filename) {
         alert('沒有可供下載的字幕內容！');
         return;
     }
+
     const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
     const link = document.createElement('a');
-    link.href = URL.createObjectURL(link);
+    link.href = URL.createObjectURL(blob);
     link.download = filename;
     document.body.appendChild(link);
     link.click();

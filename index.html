@@ -276,6 +276,50 @@ async function processSRT() {
                 }
             }
 
+            // 最後檢查：確認每一句都真正翻譯了，如果未翻譯就重新翻譯
+            statusDiv.innerText = '正在檢查是否每一句都已翻譯...';
+            const untranslatedIndexes = [];
+            for (let k = 0; k < enItems.length; k++) {
+                if (isUntranslated(items[k].content, enItems[k].content)) {
+                    untranslatedIndexes.push(k);
+                }
+            }
+
+            if (untranslatedIndexes.length > 0) {
+                for (let u = 0; u < untranslatedIndexes.length; u++) {
+                    const idx = untranslatedIndexes[u];
+                    const original = items[idx].content;
+
+                    statusDiv.innerText = `發現未翻譯句子，正在重新翻譯 (${u + 1}/${untranslatedIndexes.length})...`;
+
+                    let retranslated = null;
+                    let attempts = 3;
+                    let retryDelay = 3000;
+
+                    for (let attempt = 1; attempt <= attempts; attempt++) {
+                        try {
+                            const singleResult = await translateBatch(apiKey, [original], referenceTranscript);
+                            const candidate = singleResult.en[0];
+                            if (!isUntranslated(original, candidate)) {
+                                retranslated = candidate;
+                                break;
+                            }
+                        } catch (err) {
+                            // 忽略錯誤，稍後重試
+                        }
+
+                        if (attempt < attempts) {
+                            await sleep(retryDelay);
+                            retryDelay += 2000;
+                        }
+                    }
+
+                    if (retranslated) {
+                        enItems[idx].content = retranslated;
+                    }
+                }
+            }
+
             globalEnSRT = enItems.map(item => `${item.index}\n${item.time}\n${item.content}`).join('\n\n');
 
             statusDiv.innerText = '翻譯完成！請點擊下方按鈕下載：';
@@ -290,6 +334,22 @@ async function processSRT() {
     };
 
     reader.readAsText(file);
+}
+
+function containsChinese(text) {
+    return /[\u4e00-\u9fff\u3400-\u4dbf]/.test(text || '');
+}
+
+function isUntranslated(original, translated) {
+    const originalTrimmed = (original || '').trim();
+    if (originalTrimmed === '') return false;
+
+    const translatedTrimmed = (translated || '').trim();
+    if (translatedTrimmed === '') return true;
+    if (translatedTrimmed === originalTrimmed) return true;
+    if (containsChinese(translatedTrimmed)) return true;
+
+    return false;
 }
 
 function extractJsonObject(text) {

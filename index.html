@@ -249,9 +249,11 @@ async function processSRT() {
 
                         const msg = (err && err.message) ? err.message : '';
                         const isRateLimit = msg.includes('429') || msg.includes('RESOURCE_EXHAUSTED') || msg.includes('quota');
+                        const isRetryableFormat = msg.includes('回傳格式非標準 JSON') || msg.includes('回傳長度不符');
+                        const isServerErr = msg.includes('500') || msg.includes('503') || msg.includes('504');
 
-                        if (isRateLimit) {
-                            statusDiv.innerText = `⚠️ 觸及 API 限額，正等待 ${retryDelay / 1000} 秒後自動重試 (第 ${attempt}/${maxRetries} 次)...`;
+                        if (isRateLimit || isRetryableFormat || isServerErr) {
+                            statusDiv.innerText = `⚠️ 發生暫時性錯誤，正等待 ${retryDelay / 1000} 秒後自動重試 (第 ${attempt}/${maxRetries} 次)...`;
                             await sleep(retryDelay);
                             retryDelay += 3000;
                         } else {
@@ -290,6 +292,56 @@ async function processSRT() {
     reader.readAsText(file);
 }
 
+function extractJsonObject(text) {
+    if (!text) return null;
+
+    const cleaned = text
+        .replace(/^```(?:json)?\s*/i, '')
+        .replace(/\s*```$/i, '')
+        .trim();
+
+    try {
+        return JSON.parse(cleaned);
+    } catch (_) {}
+
+    const firstBrace = cleaned.indexOf('{');
+    const lastBrace = cleaned.lastIndexOf('}');
+    if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+        const maybeJson = cleaned.slice(firstBrace, lastBrace + 1);
+        try {
+            return JSON.parse(maybeJson);
+        } catch (_) {}
+    }
+
+    const firstBracket = cleaned.indexOf('[');
+    const lastBracket = cleaned.lastIndexOf(']');
+    if (firstBracket !== -1 && lastBracket !== -1 && lastBracket > firstBracket) {
+        const maybeArray = cleaned.slice(firstBracket, lastBracket + 1);
+        try {
+            return { en: JSON.parse(maybeArray) };
+        } catch (_) {}
+    }
+
+    return null;
+}
+
+function normalizeTranslations(textArray, parsed) {
+    let arr = null;
+
+    if (parsed && Array.isArray(parsed.en)) {
+        arr = parsed.en;
+    } else if (Array.isArray(parsed)) {
+        arr = parsed;
+    }
+
+    if (!arr) arr = [];
+
+    return textArray.map((original, idx) => {
+        const v = arr[idx];
+        return (typeof v === 'string' && v.trim() !== '') ? v.trim() : original;
+    });
+}
+
 async function translateBatch(apiKey, textArray, refTranscript) {
     const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent?key=${apiKey}`;
 
@@ -297,13 +349,13 @@ async function translateBatch(apiKey, textArray, refTranscript) {
     prompt += `Translate the following Traditional Chinese / Cantonese subtitles into natural, engaging, and conversational English.\n\n`;
 
     prompt += `【Strict Rules】\n`;
-    prompt += `1. **YouTube Vlog Style**: Use natural, conversational English suitable for modern video subtitles.\n`;
-    prompt += `2. **Screen Readability**: Keep sentences concise and easy to read quickly on screen.\n`;
-    prompt += `3. **Handle Colloquial Cantonese/Traditional Chinese**: Correctly interpret local spoken idioms (e.g., "喺" -> at/in, "睇" -> watch/see, "咁" -> so/then, "冇" -> don't have) into fluent English.\n`;
-    prompt += `4. **CRITICAL - Exact Array Length**: You MUST return a JSON array with EXACTLY ${textArray.length} items, matching the input array 1-to-1. Do NOT merge, skip, or split items.\n`;
-    prompt += `5. **No Blank Output**: Every element in the output array MUST contain a valid English translation. Never return empty strings.\n\n`;
-
-    prompt += `Output MUST be a valid JSON object in this exact format: {"en": ["Translation 1", "Translation 2"]}\n`;
+    prompt += `1. YouTube Vlog Style: Use natural, conversational English suitable for modern video subtitles.\n`;
+    prompt += `2. Screen Readability: Keep sentences concise and easy to read quickly on screen.\n`;
+    prompt += `3. Handle Colloquial Cantonese/Traditional Chinese naturally and accurately.\n`;
+    prompt += `4. CRITICAL - Exact Array Length: You MUST return EXACTLY ${textArray.length} items, matching the input array 1-to-1. Do NOT merge, skip, or split items.\n`;
+    prompt += `5. No Blank Output: Every element in the output array MUST contain a valid English translation. Never return empty strings.\n\n`;
+    prompt += `Return JSON ONLY. No markdown, no explanation.\n`;
+    prompt += `Output MUST be in this exact format: {"en": ["Translation 1", "Translation 2"]}\n`;
 
     if (refTranscript) {
         prompt += `\nReference Transcript / Context:\n${refTranscript}\n`;
@@ -317,35 +369,43 @@ async function translateBatch(apiKey, textArray, refTranscript) {
         body: JSON.stringify({
             contents: [{ parts: [{ text: prompt }] }],
             generationConfig: {
-                responseMimeType: "application/json"
+                temperature: 0.2,
+                responseMimeType: "application/json",
+                responseSchema: {
+                    type: "OBJECT",
+                    properties: {
+                        en: {
+                            type: "ARRAY",
+                            items: { type: "STRING" }
+                        }
+                    },
+                    required: ["en"]
+                }
             }
         })
     });
 
     if (!response.ok) {
-        const errData = await response.json();
-        throw new Error(errData.error?.message || `API 請求失敗 (${response.status})`);
+        let errMsg = `API 請求失敗 (${response.status})`;
+        try {
+            const errData = await response.json();
+            errMsg = errData.error?.message || errMsg;
+        } catch (_) {}
+        throw new Error(errMsg);
     }
 
     const data = await response.json();
-    let resultText = data.candidates[0]?.content?.parts[0]?.text || '';
+    const resultText = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
 
-    resultText = resultText.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/i, '').trim();
-
-    let resEn = [...textArray];
-
-    try {
-        const parsedObject = JSON.parse(resultText);
-        if (parsedObject.en && Array.isArray(parsedObject.en)) {
-            resEn = textArray.map((original, idx) => {
-                return parsedObject.en[idx] && parsedObject.en[idx].trim() !== ''
-                    ? parsedObject.en[idx]
-                    : original;
-            });
-        }
-    } catch (e) {
-        console.warn('JSON 解析失敗，重試或退回原始內容', e, resultText);
+    const parsed = extractJsonObject(resultText);
+    if (!parsed) {
         throw new Error('AI 回傳格式非標準 JSON，觸發重試機制');
+    }
+
+    const resEn = normalizeTranslations(textArray, parsed);
+
+    if (!Array.isArray(resEn) || resEn.length !== textArray.length) {
+        throw new Error('AI 回傳長度不符，觸發重試機制');
     }
 
     return { en: resEn };
